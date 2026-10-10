@@ -1896,6 +1896,21 @@ void HWCDisplay::SetSecureDisplay(bool secure_display_active) {
 
 int HWCDisplay::SetActiveDisplayConfig(uint32_t config) {
   int status = (display_intf_->SetActiveConfig(config) == kErrorNone) ? 0 : -1;
+
+  if (status == 0 && num_configs_ > 1) {
+    // The mixer follows the new mode, so the framebuffer size (SDM fb_config_, strategy and
+    // client target) must follow it too, otherwise layers are scaled from the stale fb domain.
+    uint32_t mixer_width = 0, mixer_height = 0, fb_width = 0, fb_height = 0;
+    if (GetMixerResolution(&mixer_width, &mixer_height) == kErrorNone) {
+      GetFrameBufferResolution(&fb_width, &fb_height);
+      if ((fb_width != mixer_width || fb_height != mixer_height) &&
+          SetFrameBufferResolution(mixer_width, mixer_height)) {
+        DLOGW("Failed to set framebuffer resolution %dx%d after config change", mixer_width,
+              mixer_height);
+      }
+    }
+  }
+
   validated_.reset();
   return status;
 }
