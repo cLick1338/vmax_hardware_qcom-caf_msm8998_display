@@ -156,6 +156,7 @@ class HWCDisplay : public DisplayEventHandler {
                            PPPendingParams *pending_action);
   void SolidFillPrepare();
   void SolidFillCommit();
+  bool ModeChangeSettled();
   DisplayClass GetDisplayClass();
   int GetVisibleDisplayRect(hwc_rect_t *rect);
   void BuildLayerStack(void);
@@ -301,6 +302,8 @@ class HWCDisplay : public DisplayEventHandler {
   Layer *solid_fill_layer_ = NULL;
   LayerRect solid_fill_rect_ = {};
   uint32_t solid_fill_color_ = 0;
+  bool mode_change_blank_ = false;
+  int64_t mode_change_blank_deadline_ = 0;
   LayerRect display_rect_;
   bool color_tranform_failed_ = false;
   HWCColorMode *color_mode_ = NULL;

@@ -181,6 +181,11 @@ HWC2::Error HWCDisplayPrimary::Validate(uint32_t *out_num_types, uint32_t *out_n
     MarkLayersForClientComposition();
   }
 
+  if (mode_change_blank_ && ModeChangeSettled()) {
+    mode_change_blank_ = false;
+    solid_fill_enable_ = false;
+  }
+
   // Checks and replaces layer stack for solid fill
   SolidFillPrepare();
 

@@ -1911,8 +1911,39 @@ int HWCDisplay::SetActiveDisplayConfig(uint32_t config) {
     }
   }
 
+  if (status == 0 && num_configs_ > 1 && type_ == kPrimary) {
+    timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    mode_change_blank_deadline_ = static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec + 400000000LL;
+    mode_change_blank_ = true;
+    solid_fill_enable_ = true;
+    solid_fill_color_ = 0;
+  }
+
   validated_.reset();
   return status;
+}
+
+bool HWCDisplay::ModeChangeSettled() {
+  timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  if (static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec >= mode_change_blank_deadline_) {
+    return true;
+  }
+
+  uint32_t width = 0, height = 0;
+  if (GetMixerResolution(&width, &height) != kErrorNone) {
+    return true;
+  }
+
+  for (Layer *layer : layer_stack_.layers) {
+    if (layer->composition != kCompositionGPUTarget && layer->dst_rect.left == 0 &&
+        layer->dst_rect.top == 0 && layer->dst_rect.right == FLOAT(width) &&
+        layer->dst_rect.bottom == FLOAT(height)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 int HWCDisplay::GetActiveDisplayConfig(uint32_t *config) {
