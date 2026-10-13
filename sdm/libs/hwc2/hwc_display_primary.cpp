@@ -175,6 +175,7 @@ HWC2::Error HWCDisplayPrimary::Validate(uint32_t *out_num_types, uint32_t *out_n
 
   // Fill in the remaining blanks in the layers and add them to the SDM layerstack
   BuildLayerStack();
+  color_mode_->SetHdrActive(layer_stack_.flags.hdr_present);
 
   if (color_tranform_failed_) {
     // Must fall back to client composition

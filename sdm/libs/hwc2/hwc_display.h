@@ -63,6 +63,10 @@ class HWCColorMode {
   HWC2::Error SetColorMode(android_color_mode_t mode);
   HWC2::Error SetColorTransform(const float *matrix, android_color_transform_t hint);
   HWC2::Error RestoreColorTransform();
+  // Vmax: panel hardware colour modes driven through a sysfs node
+  bool GetPanelPrimaries(bool *managed, ColorPrimaries *primaries);
+  void SetHdrActive(bool active);
+  void ReapplyPanelMode();
 
  private:
   static const uint32_t kColorTransformMatrixCount = 16;
@@ -79,12 +83,20 @@ class HWCColorMode {
     }
   }
   HWC2::Error ApplyDefaultColorMode();
+  void PopulatePanelModes();
+  void ApplyPanelMode();
 
   DisplayInterface *display_intf_ = NULL;
   android_color_mode_t current_color_mode_ = HAL_COLOR_MODE_NATIVE;
   android_color_transform_t current_color_transform_ = HAL_COLOR_TRANSFORM_IDENTITY;
   typedef std::map<android_color_transform_t, std::string> TransformMap;
   std::map<android_color_mode_t, TransformMap> color_mode_transform_map_ = {};
+  std::string panel_mode_node_;
+  std::map<android_color_mode_t, int> panel_modes_ = {};
+  int panel_mode_applied_ = -1;
+  bool hdr_active_ = false;
+  int unmanaged_p3_setting_ = -1;
+  bool native_p3_ = false;
   double color_matrix_[kColorTransformMatrixCount] = { 1.0, 0.0, 0.0, 0.0, \
                                                        0.0, 1.0, 0.0, 0.0, \
                                                        0.0, 0.0, 1.0, 0.0, \

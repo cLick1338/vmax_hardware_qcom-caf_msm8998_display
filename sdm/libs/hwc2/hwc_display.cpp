@@ -19,10 +19,12 @@
 
 #include <cutils/properties.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <math.h>
 #include <sync/sync.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <utils/constants.h>
 #include <utils/debug.h>
 #include <utils/formats.h>
@@ -108,8 +110,15 @@ HWC2::Error HWCColorMode::SetColorMode(android_color_mode_t mode) {
   auto status = HandleColorModeTransform(mode, current_color_transform_, color_matrix_);
   if (status != HWC2::Error::None) {
     DLOGE("failed for mode = %d", mode);
+    return status;
   }
 
+  // Vmax: SF re-sends native when the colour setting changes; pick the panel mode it asks for
+  if (unmanaged_p3_setting_ >= 0) {
+    native_p3_ = mode == HAL_COLOR_MODE_NATIVE &&
+                 property_get_int32("persist.sys.sf.native_mode", 0) == unmanaged_p3_setting_;
+  }
+  ApplyPanelMode();
   DLOGV_IF(kTagClient, "Color mode %d successfully set.", mode);
   return status;
 }
@@ -160,11 +169,16 @@ HWC2::Error HWCColorMode::HandleColorModeTransform(android_color_mode_t mode,
   // setting mode
   if (color_mode_transform_map_.size() > 1U && current_color_mode_ != mode) {
     color_mode_transform = color_mode_transform_map_[mode][transform_hint];
-    DisplayError error = display_intf_->SetColorMode(color_mode_transform);
-    if (error != kErrorNone) {
-      DLOGE("Failed to set color_mode  = %d transform_hint = %d", mode, hint);
-      // failure to force client composition
-      return HWC2::Error::Unsupported;
+    // Vmax: panel colour modes share one SDM mode, only the panel changes
+    bool same_sdm_mode = !panel_mode_node_.empty() &&
+        color_mode_transform == color_mode_transform_map_[current_color_mode_][transform_hint];
+    if (!same_sdm_mode) {
+      DisplayError error = display_intf_->SetColorMode(color_mode_transform);
+      if (error != kErrorNone) {
+        DLOGE("Failed to set color_mode  = %d transform_hint = %d", mode, hint);
+        // failure to force client composition
+        return HWC2::Error::Unsupported;
+      }
     }
     DLOGI("Setting Color Mode = %d Transform Hint = %d Success", mode, hint);
   }
@@ -192,6 +206,7 @@ void HWCColorMode::PopulateColorModes() {
   if (error != kErrorNone || (color_mode_count == 0)) {
     DLOGW("GetColorModeCount failed, use native color mode");
     PopulateTransform(HAL_COLOR_MODE_NATIVE, "native", "identity");
+    PopulatePanelModes();
     return;
   }
 
@@ -253,6 +268,106 @@ void HWCColorMode::PopulateColorModes() {
       }
     }
   }
+  PopulatePanelModes();
+}
+
+// Vmax: the panel provides the gamut; every exposed mode reuses the SDM native mode
+void HWCColorMode::PopulatePanelModes() {
+  char node[PROPERTY_VALUE_MAX] = {};
+  if (property_get("ro.vendor.display.panel_mode.node", node, "") <= 0) {
+    return;
+  }
+
+  auto native = color_mode_transform_map_.find(HAL_COLOR_MODE_NATIVE);
+  if (native == color_mode_transform_map_.end()) {
+    DLOGW("No native SDM mode, panel colour modes disabled");
+    return;
+  }
+  const TransformMap native_transforms = native->second;
+
+  const std::pair<android_color_mode_t, const char *> props[] = {
+    {HAL_COLOR_MODE_NATIVE, "ro.vendor.display.panel_mode.native"},
+    {HAL_COLOR_MODE_SRGB, "ro.vendor.display.panel_mode.srgb"},
+    {HAL_COLOR_MODE_DISPLAY_P3, "ro.vendor.display.panel_mode.display_p3"},
+  };
+  std::map<android_color_mode_t, int> panel_modes;
+  for (auto &prop : props) {
+    int value = property_get_int32(prop.second, -1);
+    if (value >= 0) {
+      panel_modes[prop.first] = value;
+    }
+  }
+  if (panel_modes.find(HAL_COLOR_MODE_NATIVE) == panel_modes.end()) {
+    DLOGW("Panel native mode not configured, panel colour modes disabled");
+    return;
+  }
+
+  for (auto &it : panel_modes) {
+    color_mode_transform_map_[it.first] = native_transforms;
+    DLOGI("Panel colour mode %d -> %s=%d", it.first, node, it.second);
+  }
+  panel_modes_ = panel_modes;
+  panel_mode_node_ = node;
+  if (panel_modes.find(HAL_COLOR_MODE_DISPLAY_P3) != panel_modes.end()) {
+    unmanaged_p3_setting_ = property_get_int32("ro.vendor.display.panel_mode.unmanaged_p3", -1);
+  }
+}
+
+void HWCColorMode::ApplyPanelMode() {
+  if (panel_mode_node_.empty()) {
+    return;
+  }
+
+  // HDR is tone-mapped for the P3 panel mode; unmanaged native shows it there too
+  android_color_mode_t mode = current_color_mode_;
+  if ((hdr_active_ || native_p3_) && mode == HAL_COLOR_MODE_NATIVE &&
+      panel_modes_.find(HAL_COLOR_MODE_DISPLAY_P3) != panel_modes_.end()) {
+    mode = HAL_COLOR_MODE_DISPLAY_P3;
+  }
+  auto it = panel_modes_.find(mode);
+  if (it == panel_modes_.end() || it->second == panel_mode_applied_) {
+    return;
+  }
+
+  // Fails while the panel is off; ReapplyPanelMode() retries on power on
+  int fd = open(panel_mode_node_.c_str(), O_WRONLY | O_CLOEXEC);
+  std::string value = std::to_string(it->second);
+  bool ok = fd >= 0 && write(fd, value.c_str(), value.size()) == ssize_t(value.size());
+  int err = errno;
+  if (fd >= 0) {
+    close(fd);
+  }
+  if (!ok) {
+    DLOGW("Panel mode %d write failed: %s", it->second, strerror(err));
+    panel_mode_applied_ = -1;
+    return;
+  }
+  panel_mode_applied_ = it->second;
+  DLOGI("Panel mode %d for color mode %d (hdr %d)", it->second, current_color_mode_, hdr_active_);
+}
+
+void HWCColorMode::ReapplyPanelMode() {
+  if (panel_mode_applied_ < 0) {
+    ApplyPanelMode();
+  }
+}
+
+void HWCColorMode::SetHdrActive(bool active) {
+  if (hdr_active_ != active) {
+    hdr_active_ = active;
+    ApplyPanelMode();
+  }
+}
+
+// Returns false without panel colour modes; managed is false for unmanaged native
+bool HWCColorMode::GetPanelPrimaries(bool *managed, ColorPrimaries *primaries) {
+  if (panel_mode_node_.empty()) {
+    return false;
+  }
+  *managed = current_color_mode_ != HAL_COLOR_MODE_NATIVE;
+  *primaries = current_color_mode_ == HAL_COLOR_MODE_DISPLAY_P3 ? ColorPrimaries_DCIP3 :
+                                                                 ColorPrimaries_BT709_5;
+  return true;
 }
 
 void HWCColorMode::PopulateTransform(const android_color_mode_t &mode,
@@ -315,7 +430,12 @@ void HWCColorMode::Dump(std::ostringstream* os) {
   for (auto it : color_mode_transform_map_) {
     *os << it.first <<" ";
   }
-  *os << "current mode: " << current_color_mode_ << std::endl;
+  *os << "current mode: " << current_color_mode_;
+  if (!panel_mode_node_.empty()) {
+    *os << " panel mode: " << panel_mode_applied_ << " hdr: " << hdr_active_
+        << " native p3: " << native_p3_;
+  }
+  *os << std::endl;
   *os << "current transform: ";
   for (uint32_t i = 0; i < kColorTransformMatrixCount; i++) {
     if (i % 4 == 0) {
@@ -582,9 +702,14 @@ void HWCDisplay::BuildLayerStack() {
 
 
 #ifdef FEATURE_WIDE_COLOR
+  // Vmax: with panel colour modes the target gamut is the mode's, not the widest layer's
+  bool managed = true;
+  bool panel_modes = color_mode_ && color_mode_->GetPanelPrimaries(&managed, &working_primaries);
   for (auto hwc_layer : layer_set_) {
     auto layer = hwc_layer->GetSDMLayer();
-    if (layer->input_buffer.color_metadata.colorPrimaries != working_primaries &&
+    // Unmanaged native composes as-is; HDR layers go to the tone mapper
+    bool convert = !panel_modes || (managed && !layer->input_buffer.flags.hdr);
+    if (convert && layer->input_buffer.color_metadata.colorPrimaries != working_primaries &&
         !hwc_layer->SupportLocalConversion(working_primaries)) {
       layer->flags.skip = true;
     }
@@ -727,6 +852,9 @@ HWC2::Error HWCDisplay::SetPowerMode(HWC2::PowerMode mode) {
 
   if (error == kErrorNone) {
     flush_on_error_ = flush_on_error;
+    if (color_mode_ && state != kStateOff) {
+      color_mode_->ReapplyPanelMode();
+    }
   } else {
     if (error == kErrorShutDown) {
       shutdown_pending_ = true;
