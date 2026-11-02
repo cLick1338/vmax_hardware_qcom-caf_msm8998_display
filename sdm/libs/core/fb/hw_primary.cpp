@@ -202,9 +202,13 @@ DisplayError HWPrimary::GetDisplayAttributes(uint32_t index,
 
   *display_attributes = display_attributes_;
   if (IsResolutionSwitchEnabled()) {
-    // Overwrite only the parent portion of object
+    // Keep the panel's physical size constant across resolution modes.
     display_attributes->x_pixels = display_configs_.at(index).x_pixels;
     display_attributes->y_pixels = display_configs_.at(index).y_pixels;
+    display_attributes->x_dpi = display_attributes_.x_dpi *
+        FLOAT(display_attributes->x_pixels) / FLOAT(display_attributes_.x_pixels);
+    display_attributes->y_dpi = display_attributes_.y_dpi *
+        FLOAT(display_attributes->y_pixels) / FLOAT(display_attributes_.y_pixels);
   }
 
   return kErrorNone;
